@@ -33,12 +33,17 @@ def movement_cost(current, neighbor):
     """Calculate the cost of moving from current to neighbor, accounting for diagonal movements."""
     return np.linalg.norm(np.array(neighbor) - np.array(current))
 
+def direction_vector(a, b):
+    """Calculate the normalized direction vector from point a to b."""
+    return tuple(np.array(b) - np.array(a))
+
 def a_star(start, goal, obstacles):
     neighbors = get_neighbors()
     
     open_set = PriorityQueue()
     open_set.put((0, start))
     came_from = {}
+    direction_from = {}  # Store the direction leading to each node
     g_score = {start: 0}
     f_score = {start: heuristic(start, goal)}
     
@@ -47,8 +52,13 @@ def a_star(start, goal, obstacles):
 
         if current == goal:
             path = []
+            direction_path = []  # Track the directions for filtering straight lines
             while current in came_from:
-                path.append(current)
+                if current in direction_from:
+                    prev_direction = direction_from[current]
+                    if not direction_path or prev_direction != direction_path[-1]:
+                        path.append(current)
+                    direction_path.append(prev_direction)
                 current = came_from[current]
             path.append(start)
             return path[::-1]  # Return reversed path
@@ -64,6 +74,7 @@ def a_star(start, goal, obstacles):
             
             if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
                 came_from[neighbor] = current
+                direction_from[neighbor] = direction_vector(current, neighbor)
                 g_score[neighbor] = tentative_g_score
                 f_score[neighbor] = tentative_g_score + heuristic(neighbor, goal)
                 open_set.put((f_score[neighbor], neighbor))
@@ -117,6 +128,10 @@ def main():
                 sys.exit(1)
 
             i = 0
+            start = (-400, -400, 0)
+            goal = (400, 400, 0)
+            obstacles = {(x, y, z) for x in range(-100, 101) for y in range(-100, 101) for z in range(-1, 2)}
+            path = a_star(start, goal, obstacles)
             while datalayer_client.is_connected() and not __close_app:
                 dt_str = datetime.now().strftime("%H:%M:%S.%f")
 
@@ -153,36 +168,25 @@ def main():
                         flush=True,
                     )
 
-                # CALCULATION OF NEW POSITIONS
-                if i == 0:
-                    start = (-400, -400, 0)
-                goal = (400, 400, 0)
-                grid_size = (10, 10, 10)
-                obstacles = {(x, y, z) for x in range(-300, 400) for y in range(-400, 300) for z in range(400, -400)}  # Define a cube obstacle
-                
-                path = a_star(start, goal, obstacles)
+                if path[i][0] == float64_valuex and path[i][1] == float64_valuey and path[i][2] == float64_valuez:
+                    i += 1
+                    #Writing new position
+                    addr = "plc/app/Application/sym/PLC_PRG/x"
+                    with Variant() as data:
+                        data.set_float64(path[i][0])
+                        result, _ = datalayer_client.write_sync(addr, data)
 
-                #Writing new position
-                addr = "plc/app/Application/sym/PLC_PRG/x"
-                with Variant() as data:
-                    data.set_float64(path[i][0])
-                    result, _ = datalayer_client.write_sync(addr, data)
+                    addr = "plc/app/Application/sym/PLC_PRG/y"
+                    with Variant() as data:
+                        data.set_float64(path[i][1])
+                        result, _ = datalayer_client.write_sync(addr, data)
 
-                addr = "plc/app/Application/sym/PLC_PRG/y"
-                with Variant() as data:
-                    data.set_float64(path[i][1])
-                    result, _ = datalayer_client.write_sync(addr, data)
-
-                addr = "plc/app/Application/sym/PLC_PRG/z"
-                with Variant() as data:
-                    data.set_float64(path[i][2])
-                    result, _ = datalayer_client.write_sync(addr, data)
-
-                while path[i][0] != float64_valuex and path[i][1] != float64_valuey and path[i][2] != float64_valuez:
-                    pass
+                    addr = "plc/app/Application/sym/PLC_PRG/z"
+                    with Variant() as data:
+                        data.set_float64(path[i][2])
+                        result, _ = datalayer_client.write_sync(addr, data)
                 if path[i][0] == goal[0] and path[i][1] == goal[1] and path[i][2] == goal[2]:
                     break
-                i += 1
 
             print("ERROR ctrlX Data Layer is NOT connected")
             print("INFO Closing subscription", flush=True)
