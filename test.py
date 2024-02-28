@@ -16,70 +16,137 @@ from comm.datalayer import Metadata, SubscriptionProperties
 from ctrlxdatalayer.variant import Result, Variant
 
 from helper.ctrlx_datalayer_helper import get_client
+
 import numpy as np
 from queue import PriorityQueue
+from functools import lru_cache
 
 __close_app = False
 
+@lru_cache(maxsize=None)  # Add memoization to the heuristic function
 def heuristic(a, b):
     """Calculate the Euclidean distance between two points."""
-    return np.linalg.norm(np.array(a) - np.array(b))
+    return ((a[0] - b[0])**2 + (a[1] - b[1])**2 + (a[2] - b[2])**2) ** 0.5
 
 def get_neighbors():
-    """Generate all possible movements including diagonal in 3D space."""
-    return [(dx, dy, dz) for dx in [-1, 0, 1] for dy in [-1, 0, 1] for dz in [-1, 0, 1] if not (dx == dy == dz == 0)]
+    """Generate possible movements in 3D space, favoring larger steps."""
+    return [(dx, dy, dz) for dx in [-10, 0, 10] for dy in [-10, 0, 10] for dz in [-10, 0, 10] if not (dx == dy == dz == 0)]
 
-def movement_cost(current, neighbor):
-    """Calculate the cost of moving from current to neighbor, accounting for diagonal movements."""
-    return np.linalg.norm(np.array(neighbor) - np.array(current))
+neighbors = get_neighbors()
 
-def direction_vector(a, b):
-    """Calculate the normalized direction vector from point a to b."""
-    return tuple(np.array(b) - np.array(a))
+def is_obstacle(x, y, z, obstacles):
+    """Check if the point is inside an obstacle."""
+    return (x, y, z) in obstacles
 
 def a_star(start, goal, obstacles):
-    neighbors = get_neighbors()
-    
     open_set = PriorityQueue()
     open_set.put((0, start))
     came_from = {}
-    direction_from = {}  # Store the direction leading to each node
     g_score = {start: 0}
     f_score = {start: heuristic(start, goal)}
-    
+
     while not open_set.empty():
-        current_cost, current = open_set.get()
+        _, current = open_set.get()
 
         if current == goal:
             path = []
-            direction_path = []  # Track the directions for filtering straight lines
             while current in came_from:
-                if current in direction_from:
-                    prev_direction = direction_from[current]
-                    if not direction_path or prev_direction != direction_path[-1]:
-                        path.append(current)
-                    direction_path.append(prev_direction)
+                path.append(current)
                 current = came_from[current]
             path.append(start)
-            return path[::-1]  # Return reversed path
-        
-        for offset in neighbors:
-            neighbor = tuple(np.array(current) + np.array(offset))
-            
-            # Skip through obstacles or if the neighbor is invalid
-            if neighbor in obstacles:
+            return path[::-1]
+
+        for dx, dy, dz in neighbors:
+            neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+
+            if is_obstacle(neighbor[0], neighbor[1], neighbor[2], obstacles):
                 continue
-            
-            tentative_g_score = g_score[current] + movement_cost(current, neighbor)
-            
+
+            tentative_g_score = g_score[current] + heuristic(current, neighbor)
+
             if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
                 came_from[neighbor] = current
-                direction_from[neighbor] = direction_vector(current, neighbor)
                 g_score[neighbor] = tentative_g_score
                 f_score[neighbor] = tentative_g_score + heuristic(neighbor, goal)
                 open_set.put((f_score[neighbor], neighbor))
-    
-    return None  # No path found
+
+    return None
+
+def line_of_sight(start, end, obstacles):
+    """Check if there's a clear line of sight between start and end points."""
+    # Bresenham's Line Algorithm in 3D to check for obstacles
+    points = []
+    x0, y0, z0 = start
+    x1, y1, z1 = end
+    dx, dy, dz = abs(x1 - x0), abs(y1 - y0), abs(z1 - z0)
+    xs, ys, zs = 1 if x1 > x0 else -1, 1 if y1 > y0 else -1, 1 if z1 > z0 else -1
+    # Driving axis is the axis with the maximum delta
+    if dx >= dy and dx >= dz:
+        # x is driving axis
+        p1, p2 = 2 * dy - dx, 2 * dz - dx
+        while x0 != x1:
+            if (x0, y0, z0) in obstacles:
+                return False
+            if p1 >= 0:
+                y0 += ys
+                p1 -= 2 * dx
+            if p2 >= 0:
+                z0 += zs
+                p2 -= 2 * dx
+            x0 += xs
+            p1 += 2 * dy
+            p2 += 2 * dz
+    elif dy >= dx and dy >= dz:
+        # y is driving axis
+        p1, p2 = 2 * dx - dy, 2 * dz - dy
+        while y0 != y1:
+            if (x0, y0, z0) in obstacles:
+                return False
+            if p1 >= 0:
+                x0 += xs
+                p1 -= 2 * dy
+            if p2 >= 0:
+                z0 += zs
+                p2 -= 2 * dy
+            y0 += ys
+            p1 += 2 * dx
+            p2 += 2 * dz
+    else:
+        # z is driving axis
+        p1, p2 = 2 * dy - dz, 2 * dx - dz
+        while z0 != z1:
+            if (x0, y0, z0) in obstacles:
+                return False
+            if p1 >= 0:
+                y0 += ys
+                p1 -= 2 * dz
+            if p2 >= 0:
+                x0 += xs
+                p2 -= 2 * dz
+            z0 += zs
+            p1 += 2 * dy
+            p2 += 2 * dx
+    return True  # No obstacles found
+
+def smooth_path(path, obstacles):
+    """Remove unnecessary waypoints from the path if direct line of sight exists."""
+    if not path:
+        return path
+
+    smooth_path = [path[0]]  # Always include the start point
+    i = 0
+    while i < len(path) - 1:
+        j = len(path) - 1
+        while j > i + 1:
+            if line_of_sight(path[i], path[j], obstacles):
+                smooth_path.append(path[j])
+                i = j  # Jump to the next waypoint
+                break
+            j -= 1
+        if j == i + 1:  # No direct path found; proceed to the next waypoint
+            smooth_path.append(path[i + 1])
+            i += 1
+    return smooth_path
 
 def handler(signum, frame):
     """handler"""
@@ -130,8 +197,15 @@ def main():
             i = 0
             start = (-400, -400, 0)
             goal = (400, 400, 0)
-            obstacles = {(x, y, z) for x in range(-100, 101) for y in range(-100, 101) for z in range(-1, 2)}
+            extra_range = 7
+            obstacles = {(x, y, z) for x in range(-100 - extra_range, 101 + extra_range) for y in range(-100 - extra_range, 101 + extra_range) for z in range(-100 - extra_range, 100 + extra_range)}
+
             path = a_star(start, goal, obstacles)
+            if path:
+                smoothed_path = smooth_path(path, obstacles)
+                print("Path found:", len(smoothed_path), smoothed_path)
+            else:
+                print("No path found.")
             while datalayer_client.is_connected() and not __close_app:
                 dt_str = datetime.now().strftime("%H:%M:%S.%f")
 
@@ -168,7 +242,7 @@ def main():
                         flush=True,
                     )
 
-                if path[i][0] == float64_valuex and path[i][1] == float64_valuey and path[i][2] == float64_valuez:
+                if (path[i][0] == float64_valuex and path[i][1] == float64_valuey and path[i][2] == float64_valuez) or i == 0:
                     i += 1
                     #Writing new position
                     addr = "plc/app/Application/sym/PLC_PRG/x"
@@ -187,6 +261,7 @@ def main():
                         result, _ = datalayer_client.write_sync(addr, data)
                 if path[i][0] == goal[0] and path[i][1] == goal[1] and path[i][2] == goal[2]:
                     break
+                time.sleep(1)
 
             print("ERROR ctrlX Data Layer is NOT connected")
             print("INFO Closing subscription", flush=True)
